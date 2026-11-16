@@ -30,15 +30,14 @@ Alles steht oben in `build.py`:
 - `TOPICS`: Themen und ihre Suchwörter.
 - `TOP`: Zahl der Top-Meldungen je Sprachraum. `SECTIONS`: Zeitfenster und Obergrenzen je Rubrik.
 
-## Online stellen (noch offen)
+## Online
 
-Vorbereitet ist `.github/workflows/presseschau.yml`: GitHub baut die Seite jeden Morgen gegen 5 bis 6 Uhr neu und legt sie in `docs/` ab. Dafür fehlt noch:
+Die Seite steht unter <https://zabatob.github.io/presseschau/> (seit 17.11.2026). Am Handy im Browser öffnen und über "Teilen" zum Home-Bildschirm hinzufügen, dann liegt sie dort wie eine App.
 
-1. `gh auth login`
-2. Repo anlegen und hochladen: `git init -b main && git add -A && git commit -m "Presseschau" && gh repo create presseschau --public --source . --push`
-3. In den Repo-Einstellungen unter Pages: "Deploy from a branch", Branch `main`, Ordner `/docs`.
-
-Danach ist die Seite unter `https://<github-name>.github.io/presseschau/` erreichbar und lässt sich am Handy zum Home-Bildschirm hinzufügen. Der Workflow ist bisher nicht gelaufen, also ungetestet. Die Seite trägt `noindex`, taucht also nicht in Suchmaschinen auf, ist aber für jeden mit dem Link lesbar.
+- `.github/workflows/presseschau.yml` baut die Seite jeden Morgen um 04:17 UTC neu (05:17 Winterzeit, 06:17 Sommerzeit in Wien) und committet sie nach `docs/`. GitHub Pages liefert `docs/` vom Branch `main` aus.
+- Außer der Reihe neu bauen: `gh workflow run presseschau.yml` oder auf GitHub unter Actions > Presseschau > Run workflow.
+- Änderungen an `build.py` wirken nach `git push` ab dem nächsten Lauf. Vorher `git pull`, weil der tägliche Lauf selbst committet.
+- Die Seite trägt `noindex`, taucht also nicht in Suchmaschinen auf, ist aber für jeden mit dem Link lesbar.
 
 ## Bewusst weggelassen
 
