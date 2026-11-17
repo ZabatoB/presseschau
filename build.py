@@ -690,7 +690,7 @@ article h4 { margin: 0; font: 600 1.12rem/1.28 var(--serif); text-wrap: balance 
 /* Meinung, Analyse, Podcasts: je Quelle eine kleine Gruppe mit knappen Zeilen */
 .group { display: grid; gap: .45rem }
 .group h4 { margin: 0; font: 700 .72rem/1.3 var(--sans); letter-spacing: .08em; text-transform: uppercase; color: var(--muted) }
-.group article { line-height: 1.3 }
+.group article { line-height: 1.3; text-wrap: pretty }
 .group article a { font: 600 1.02rem/1.3 var(--serif) }
 .when { margin-left: .4rem; font-size: .78rem; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap }
 .when > * + * { margin-left: .4rem }
