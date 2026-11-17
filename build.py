@@ -24,8 +24,12 @@ from zoneinfo import ZoneInfo
 UA = "Presseschau/1.0 (privater Feedreader)"
 TZ = ZoneInfo("Europe/Vienna")
 OUT = Path(__file__).parent / "docs" / "index.html"
+KINDS = {"meinung": "Meinung", "analyse": "Analyse", "podcast": "Podcast"}
+TIDY = re.compile(r"\s*[-–|]\s*(?:Meinung|Kommentar|Leitartikel|Editorial|Kolumne)\s*$"
+                  r"|^(?:Kommentar|Gastkommentar|Kolumne|Leitartikel)\s*[-–]\s*", re.I)
 TOP = 8      # Top-Meldungen je Sprachraum
 SAME = 0.25  # ab dieser Ähnlichkeit (0..1) gelten zwei Meldungen als dieselbe Geschichte
+NEAR = 0.21  # ab dieser Ähnlichkeit gilt ein Kommentar, eine Analyse oder ein Podcast als Einordnung zu einer Top-Meldung
 # Politik-Feeds liefern auch Kultur, Sport und Videoclips mit. Die erkennt man am Ressort in der Adresse.
 OFFTOPIC = re.compile(r"/(?:kultur|culture|sports?|film|kino|cinema|musik|music|musique|football|fussball|books|livres"
                       r"|tv-and-radio|lifeandstyle|food|fashion|travel|stage|artanddesign|games|arts|style|movies"
@@ -304,7 +308,7 @@ def parse(stream, limit=120):
 
 def select(feed, raw, now):
     """Aus den rohen Einträgen eines Feeds die frischen, brauchbaren machen (neueste zuerst)."""
-    region, section, source, _url, *topic = feed
+    region, section, source, url, *topic = feed
     _, days, cap = SECTIONS[section]
     items = []
     for it in raw:
@@ -317,11 +321,15 @@ def select(feed, raw, now):
             continue
         if region == "fr":  # französische Typografie: kein Zeilenumbruch vor : ; ? ! » und nach «
             it = {**it, **{k: re.sub(r" (?=[:;?!»])|(?<=«) ", chr(160), it[k]) for k in ("title", "text")}}  # chr(160) = geschütztes Leerzeichen
+        if section == "meinung":  # "… - Kommentar", "… | Editorial", "KOMMENTAR - …": sagt schon die Rubrik
+            it = {**it, "title": TIDY.sub("", it["title"])}
         blob = it["title"] + " " + it["text"][:400]
-        items.append({**it, "region": region, "section": section, "source": source,
+        items.append({**it, "region": region, "section": section, "source": source, "feed": url,
                       "topics": set(topic) | {k for k, (_, rx) in TOPICS.items() if rx.search(blob)}})
     items.sort(key=lambda i: i["date"], reverse=True)
-    return items[:cap]
+    # Nachrichten und Themenseiten werden hier gekappt. Meinung, Analyse und Podcasts erst beim Schreiben der Seite,
+    # damit vorher geprüft werden kann, welche Beiträge zu den Top-Meldungen gehören.
+    return items[:cap] if section in ("news", "thema") else items
 
 
 def load(feed, now):
@@ -362,21 +370,49 @@ def merge(groups):
     return out
 
 
-def cluster(items):
-    """Gruppiert Meldungen, die dieselbe Geschichte erzählen. Jede Gruppe ist nach Datum sortiert, neueste zuerst.
+def weigh(items):
+    """Gibt jedem Eintrag einen Wortvektor: seltene Wörter wiegen schwer (tf-idf), Wörter aus dem Titel doppelt.
 
-    ponytail: grobe Wortstämme, tf-idf, Kosinus zum Gruppenschwerpunkt. Reicht für "wer berichtet noch darüber".
-    Kleben Geschichten falsch zusammen: SAME erhöhen. Echtes Upgrade wären Embeddings.
+    ponytail: grobe Wortstämme statt Sprachverständnis. Reicht für "wer berichtet noch darüber" und
+    "welcher Kommentar gehört dazu". Klebt Falsches zusammen: SAME erhöhen. Echtes Upgrade wären Embeddings.
     """
-    df = Counter()
+    df, words = Counter(), []
     for it in items:
-        it["_t"], it["_x"] = stems(it["title"]), stems(it["text"][:300])
-        df.update(it["_t"] | it["_x"])
+        title = stems(it["title"])
+        words.append((title, title | stems(it["text"][:300])))
+        df.update(words[-1][1])
+    for it, (title, both) in zip(items, words):
+        it["_v"] = {s: (2 if s in title else 1) * log(len(items) / df[s]) for s in both}
+
+
+def cluster(items):
+    """Gruppiert Meldungen, die dieselbe Geschichte erzählen (vorher weigh). Jede Gruppe: neueste Meldung zuerst."""
     newest = sorted(items, key=lambda i: i["date"], reverse=True)
-    vec = lambda it: {s: (2 if s in it["_t"] else 1) * log(len(items) / df[s]) for s in it["_t"] | it["_x"]}
     # Zweiter Durchgang führt Gruppen zusammen, die im ersten getrennt gestartet sind (sonst steht eine Geschichte doppelt oben)
-    groups = merge(merge([[it], vec(it)] for it in newest))
+    groups = merge(merge([[it], it["_v"]] for it in newest))
     return [sorted(members, key=lambda i: i["date"], reverse=True) for members, _ in groups]
+
+
+def relate(top, side):
+    """Einordnung: sucht zu jeder Top-Meldung die Meinungs-, Analyse- und Podcast-Beiträge zur selben Geschichte.
+
+    Ergebnis: je Top-Meldung höchstens drei Beiträge, der passendste zuerst, je Quelle nur einer.
+    Jeder zugeordnete Beitrag bekommt außerdem das Kennzeichen "_story" (für die Auswahl in seiner Rubrik).
+    """
+    centers = [sum((Counter(i["_v"]) for i in c), Counter()) for c in top]
+    hits = [[] for _ in top]
+    for it in side:
+        score, k = max(((cos(it["_v"], center), k) for k, center in enumerate(centers)), default=(0, 0))
+        if score >= NEAR:
+            it["_story"] = True
+            hits[k].append((score, it))
+    out = []
+    for found in hits:
+        best = {}
+        for _, it in sorted(found, key=lambda h: -h[0]):
+            best.setdefault(it["source"], it)
+        out.append(list(best.values())[:3])
+    return out
 
 
 def pick_top(clusters):
@@ -413,8 +449,9 @@ def link(it, label):
     return f'<a href="{e(it["link"])}" target="_blank" rel="noopener noreferrer">{e(label)}</a>'
 
 
-def entry(group, now, cls=""):
-    """Ein Eintrag. `group` ist eine Liste: Hauptmeldung zuerst, danach dieselbe Geschichte bei anderen Quellen."""
+def entry(group, now, cls="", context=()):
+    """Ein Eintrag. `group` ist eine Liste: Hauptmeldung zuerst, danach dieselbe Geschichte bei anderen Quellen.
+    `context` sind Meinungs-, Analyse- und Podcast-Beiträge zur selben Geschichte."""
     it, others = group[0], group[1:]
     topics = [t for t in TOPICS if any(t in i["topics"] for i in group)]
     teaser = "" if not it["text"] or it["text"].startswith(it["title"][:40]) else f'<p class="teaser">{e(short(it["text"]))}</p>'
@@ -424,6 +461,10 @@ def entry(group, now, cls=""):
         names = ", ".join(e(i["source"]) for i in others)
         rows = "".join(f'<li><b>{e(i["source"])}</b> {link(i, i["title"])}</li>' for i in others)
         also = f'<details class="also"><summary>Auch bei {names}</summary><ul>{rows}</ul></details>'
+    if context:
+        rows = "".join(f'<li><span class="kind">{KINDS[i["section"]]}</span> {link(i, i["title"])} '
+                       f'<span class="by">{e(i["source"].split(":")[0])}</span></li>' for i in context)
+        also += f'<div class="context"><h5>Einordnung</h5><ul>{rows}</ul></div>'
     return (f'<article class="{cls}" data-t="{" ".join(topics)}"><h4>{link(it, it["title"])}</h4>{teaser}'
             f'<p class="meta"><span class="src">{e(it["source"])}</span>'
             f'<time datetime="{it["date"].isoformat()}">{stamp(it["date"], now)}</time>{tags}</p>{also}</article>')
@@ -441,13 +482,22 @@ def render(items, failed, now):
     cols = {(r, s): [] for r in REGIONS for s in SECTIONS}
     for region in REGIONS:
         pool = [i for i in items if i["region"] == region]
+        weigh(pool)
+        side = [i for i in pool if i["section"] not in ("news", "thema")]
         clusters = cluster([i for i in pool if i["section"] in ("news", "thema")])
         top = pick_top(clusters)
+        context = relate(top, side)
         shown = {id(c) for c in top}
         rest = [c for c in clusters if id(c) not in shown and any(i["topics"] for i in c)]
-        cols[region, "news"] = [entry(by_source(c), now, "top") for c in top] + [entry(by_source(c), now, "extra") for c in rest]
+        cols[region, "news"] = ([entry(by_source(c), now, "top", ctx) for c, ctx in zip(top, context)]
+                                + [entry(by_source(c), now, "extra") for c in rest])
         for s in ("meinung", "analyse", "podcast"):
-            cols[region, s] = [entry([i], now) for i in sorted((i for i in pool if i["section"] == s), key=lambda i: RANK[i["source"]])]
+            # Je Feed die besten Beiträge: erst was zu einer Top-Meldung gehört, dann was eines der Themen trifft,
+            # dann das Neueste. Bei Podcasts zählt nach der Top-Meldung nur die Aktualität.
+            for url in dict.fromkeys(f[3] for f in FEEDS if f[:2] == (region, s)):
+                mine = sorted((i for i in side if i["feed"] == url),
+                              key=lambda i: ("_story" not in i, s != "podcast" and not i["topics"]))
+                cols[region, s] += [entry([i], now) for i in mine[:SECTIONS[s][2]]]
 
     local = now.astimezone(TZ)
     dateline = f"{DAYS[local.weekday()]}, {local.day}. {MONTHS[local.month - 1]} {local.year}"
@@ -485,6 +535,11 @@ def render(items, failed, now):
 <meta name="robots" content="noindex, nofollow">
 <meta name="referrer" content="no-referrer">
 <title>Presseschau in drei Sprachen</title>
+<meta property="og:title" content="Presseschau in drei Sprachen">
+<meta property="og:description" content="Tägliche politische Presseschau aus dem deutsch-, englisch- und französischsprachigen Raum: Nachrichten, Leitartikel, Analysen und Podcasts.">
+<meta name="apple-mobile-web-app-title" content="Presseschau">
+<link rel="icon" href="icon.png">
+<link rel="apple-touch-icon" href="icon.png">
 <style>
 {css}</style>
 </head>
@@ -562,6 +617,14 @@ article h4 a:visited { color: var(--read) }
 .also a { color: inherit; text-underline-offset: .16em }
 .also a:visited { color: var(--read) }
 .extra { display: none }
+.context { margin-top: .6rem; padding-left: .9rem; border-left: 2px solid var(--marker) }
+.context h5 { margin: 0 0 .35rem; font: 700 .68rem/1.2 var(--sans); letter-spacing: .1em; text-transform: uppercase; color: var(--muted) }
+.context ul { margin: 0; padding: 0; list-style: none; display: grid; gap: .45rem; font-size: .9rem; line-height: 1.35 }
+.context a { color: inherit; font-family: var(--serif); font-weight: 600; text-decoration: none; overflow-wrap: anywhere }
+.context a:hover { text-decoration: underline; text-underline-offset: .16em }
+.context a:visited { color: var(--read) }
+.kind { margin-right: .2rem; font-size: .68rem; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: var(--muted) }
+.by { color: var(--muted); font-size: .78rem }
 
 footer { margin-top: 3rem; padding-top: 1rem; border-top: 1px solid var(--faint); color: var(--muted); font-size: .82rem; max-width: 65ch }
 footer p { margin: .5rem 0 0 }
@@ -627,13 +690,19 @@ def selftest():
     assert tag("Das politische Betriebsklima und die gesetzliche Rente") == set()
     assert tag("J'ai lu que la motion de censure échoue") == set()
     assert tag("Projet de loi sur l'IA: manifestation à Paris") == {"ki", "recht", "protest"}
-    mk = lambda src, title, h: {"source": src, "section": "news", "title": title, "text": "", "date": now - timedelta(hours=h), "topics": set()}
+    mk = lambda src, title, h, section="news": {"source": src, "section": section, "title": title, "text": "", "date": now - timedelta(hours=h), "topics": set()}
     news = [mk("Der Spiegel", "Koalition einigt sich auf Rentenpaket", 1), mk("Die Zeit", "Rentenpaket: Koalition einigt sich nach langem Streit", 2),
             mk("FAZ", "Erdbeben erschüttert Norditalien", 3), mk("taz", "Bahnstreik legt Fernverkehr lahm", 4),
             mk("NZZ", "Schweiz stimmt über Mietrecht ab", 5), mk("Der Standard", "Nationalrat debattiert Budget", 6)]
+    side = [mk("NZZ: Meinung", "Die Koalition einigt sich beim Rentenpaket zu billig", 3, "meinung"),
+            mk("taz: Debatte", "Warum wir mehr Radwege brauchen", 3, "meinung")]
+    weigh(news + side)
     top = pick_top(cluster(news))
     assert sorted(i["source"] for i in top[0]) == ["Der Spiegel", "Die Zeit"], top[0]   # gleiche Geschichte, zwei Quellen, ganz oben
     assert len(top) == 5
+    assert [i["source"] for i in relate(top, side)[0]] == ["NZZ: Meinung"] and "_story" not in side[1]   # Kommentar hängt an seiner Geschichte
+    raw = [{"title": "KOMMENTAR - Mutlos", "link": "https://x.test/k", "text": "", "date": now}]
+    assert select(("de", "meinung", "NZZ: Meinung", ""), raw, now)[0]["title"] == "Mutlos"
     page = render([{**a[0], "title": "<script>alert(1)</script>"}], ["Kaputt <b>"], now)
     assert "<script>alert" not in page and "&lt;script&gt;alert(1)" in page and "Kaputt &lt;b&gt;" in page
     print("Selbsttest ok")
