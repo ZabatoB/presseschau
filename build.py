@@ -558,8 +558,9 @@ def render(items, failed, now):
     sources = "".join(
         f'<p><b>{e(REGIONS[r][0])}:</b> {e(", ".join(dict.fromkeys(f[2] for f in FEEDS if f[0] == r)))}</p>' for r in REGIONS)
     missing = f'<p>Heute nicht erreichbar: {e(", ".join(failed))}.</p>' if failed else ""
+    built = now.isoformat(timespec="seconds")  # liest auch der Workflow (Ersatz-Läufe) und das Skript in der Seite
     return f"""<!doctype html>
-<html lang="de" data-built="{now.isoformat()}">
+<html lang="de" data-built="{built}">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">

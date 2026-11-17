@@ -2,8 +2,10 @@ name: Presseschau
 
 on:
   schedule:
-    - cron: "17 4 * * *" # Morgenausgabe: 04:17 UTC = 05:17 Winterzeit / 06:17 Sommerzeit in Wien
-    - cron: "17 15 * * *" # Abendausgabe: 15:17 UTC = 16:17 Winterzeit / 17:17 Sommerzeit in Wien
+    # Zwei Ausgaben am Tag: morgens ab 04:17 UTC (05:17 Winterzeit / 06:17 Sommerzeit in Wien)
+    # und nachmittags ab 15:17 UTC (16:17 / 17:17). GitHub lässt geplante Läufe gelegentlich aus,
+    # deshalb folgen je zwei Ersatz-Zeitpunkte eine und zwei Stunden später.
+    - cron: "17 4-6,15-17 * * *"
   workflow_dispatch: # zusätzlich von Hand startbar (Actions > Presseschau > Run workflow)
 
 permissions:
@@ -18,8 +20,17 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - run: python3 -I build.py --test
-      - run: python3 -I build.py
-      # ponytail: Die fertige Seite wird täglich ins Repo committet. Das hält den Zeitplan am Leben
+      - name: Ausgabe bauen
+        run: |
+          # Ein Ersatz-Lauf baut nur, wenn die letzte Ausgabe älter als drei Stunden ist.
+          gebaut=$(grep -o 'data-built="[^"]*' docs/index.html | cut -d'"' -f2)
+          if [ "$GITHUB_EVENT_NAME" = "schedule" ] && [ -n "$gebaut" ] \
+             && [ $(( $(date +%s) - $(date -d "$gebaut" +%s) )) -lt 10800 ]; then
+            echo "Die Ausgabe von $gebaut ist frisch genug, kein neuer Bau."
+            exit 0
+          fi
+          python3 -I build.py
+      # ponytail: Die fertige Seite wird ins Repo committet. Das hält den Zeitplan am Leben
       # (GitHub schaltet geplante Workflows nach 60 Tagen ohne Aktivität ab) und spart ein eigenes
       # Pages-Deployment. Wird die Historie zu groß: auf actions/deploy-pages umstellen.
       - name: Ausgabe veröffentlichen
