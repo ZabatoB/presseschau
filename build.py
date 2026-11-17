@@ -41,11 +41,11 @@ REGIONS = {  # Kürzel: (Name, Beschriftung des Umschalters in der jeweiligen Sp
     "fr": ("Französischsprachiger Raum", "Français"),
 }
 
-SECTIONS = {  # Rubrik: (Überschrift, Zeitfenster in Tagen, höchstens so viele Einträge je Feed)
+SECTIONS = {  # Rubrik: (Name des Reiters, Zeitfenster in Tagen, höchstens so viele Einträge je Feed)
     "news": ("Nachrichten", 1.5, 99),
     "thema": ("", 14, 4),  # Themenseiten der Zeitungen; erscheinen unter Nachrichten, sobald ein Thema gewählt ist
-    "meinung": ("Leitartikel und Meinung", 7, 2),
-    "analyse": ("Analyse und Hintergrund", 21, 2),
+    "meinung": ("Meinung", 7, 2),
+    "analyse": ("Analyse", 21, 2),
     "podcast": ("Podcasts", 14, 1),
 }
 
@@ -256,6 +256,15 @@ def when(s):
     return d if d.tzinfo else d.replace(tzinfo=timezone.utc)
 
 
+def minutes(s):
+    """Podcast-Dauer (itunes:duration) kommt als Sekunden oder als [HH:]MM:SS. Ergebnis in Minuten, 0 = unbekannt."""
+    try:
+        parts = [int(float(p)) for p in (s or "").split(":")]
+    except ValueError:
+        return 0
+    return round(sum(p * 60 ** i for i, p in enumerate(reversed(parts))) / 60)
+
+
 def clean(s):
     """Feed-Text ist fremde Eingabe: Tags raus, Entities auflösen. Escapt wird erst bei der Ausgabe."""
     s = re.sub(r"<[^>]*>", " ", s or "")
@@ -292,13 +301,14 @@ def parse(stream, limit=120):
                 f.setdefault("audio", c.get("url", ""))
             elif name in ("title", "description", "summary", "content") and ns in CORE:
                 f.setdefault(name, "".join(c.itertext()))
-            elif name in ("pubDate", "published", "date", "updated"):
+            elif name in ("pubDate", "published", "date", "updated", "duration"):
                 f.setdefault(name, c.text)
         out.append({
             "title": clean(f.get("title")),
             "link": f.get("link") or f.get("audio") or "",
             "text": clean(f.get("description") or f.get("summary") or f.get("content")),
             "date": when(f.get("pubDate") or f.get("published") or f.get("date") or f.get("updated")),
+            "minutes": minutes(f.get("duration")),
         })
         el.clear()
         if len(out) >= limit:
@@ -449,37 +459,57 @@ def link(it, label):
     return f'<a href="{e(it["link"])}" target="_blank" rel="noopener noreferrer">{e(label)}</a>'
 
 
-def entry(group, now, cls="", context=()):
-    """Ein Eintrag. `group` ist eine Liste: Hauptmeldung zuerst, danach dieselbe Geschichte bei anderen Quellen.
-    `context` sind Meinungs-, Analyse- und Podcast-Beiträge zur selben Geschichte."""
+def tags(topics):
+    return "".join(f'<span class="tag">{e(TOPICS[t][0])}</span>' for t in TOPICS if t in topics)
+
+
+def clock(it, now):
+    return f'<time datetime="{it["date"].isoformat()}">{stamp(it["date"], now)}</time>'
+
+
+def story(group, now, rank=0, context=()):
+    """Eine Meldung. `group`: Hauptmeldung zuerst, danach dieselbe Geschichte bei anderen Quellen.
+
+    Mit `rank` ist es eine Top-Meldung (Nummer, Anriss, Einordnung durch `context`),
+    ohne `rank` eine knappe Zeile, die nur bei gewähltem Thema erscheint.
+    """
     it, others = group[0], group[1:]
-    topics = [t for t in TOPICS if any(t in i["topics"] for i in group)]
-    teaser = "" if not it["text"] or it["text"].startswith(it["title"][:40]) else f'<p class="teaser">{e(short(it["text"]))}</p>'
-    tags = "".join(f'<span class="tag">{e(TOPICS[t][0])}</span>' for t in topics)
-    also = ""
+    topics = {t for i in group for t in i["topics"]}
+    body = f'<h4>{link(it, it["title"])}</h4>'
+    if rank and it["text"] and not it["text"].startswith(it["title"][:40]):
+        body += f'<p class="teaser">{e(short(it["text"]))}</p>'
+    body += f'<div class="meta"><span class="src">{e(it["source"])}</span>{clock(it, now)}{tags(topics)}'
     if others:
-        names = ", ".join(e(i["source"]) for i in others)
         rows = "".join(f'<li><b>{e(i["source"])}</b> {link(i, i["title"])}</li>' for i in others)
-        also = f'<details class="also"><summary>Auch bei {names}</summary><ul>{rows}</ul></details>'
+        body += (f'<details class="also"><summary>{len(others)} weitere Quelle{"n" if len(others) > 1 else ""}</summary>'
+                 f'<ul>{rows}</ul></details>')
+    body += "</div>"
     if context:
-        rows = "".join(f'<li><span class="kind">{KINDS[i["section"]]}</span> {link(i, i["title"])} '
-                       f'<span class="by">{e(i["source"].split(":")[0])}</span></li>' for i in context)
-        also += f'<div class="context"><h5>Einordnung</h5><ul>{rows}</ul></div>'
-    return (f'<article class="{cls}" data-t="{" ".join(topics)}"><h4>{link(it, it["title"])}</h4>{teaser}'
-            f'<p class="meta"><span class="src">{e(it["source"])}</span>'
-            f'<time datetime="{it["date"].isoformat()}">{stamp(it["date"], now)}</time>{tags}</p>{also}</article>')
+        body += '<ul class="context">' + "".join(
+            f'<li><span class="kind">{KINDS[i["section"]]}</span> {link(i, i["title"])} '
+            f'<span class="by">{e(i["source"].split(":")[0])}</span></li>' for i in context) + "</ul>"
+    number = f'<span class="rank">{rank}</span>' if rank else ""
+    return f'<article class="{"top" if rank else "extra"}" data-t="{" ".join(sorted(topics))}">{number}<div>{body}</div></article>'
+
+
+def row(it, now):
+    """Knappe Zeile für Meinung, Analyse und Podcasts: Überschrift, dahinter Zeit, Dauer und Themen."""
+    length = f'<span>{it["minutes"]} Min.</span>' if it.get("minutes") else ""
+    return (f'<article data-t="{" ".join(sorted(it["topics"]))}">{link(it, it["title"])}'
+            f'<span class="when">{clock(it, now)}{length}{tags(it["topics"])}</span></article>')
 
 
 def by_source(c):
-    """Je Quelle die neueste Meldung der Gruppe, wichtigste Quelle zuerst."""
-    first = {}
-    for i in c:
-        first.setdefault(i["source"], i)
-    return sorted(first.values(), key=lambda i: RANK[i["source"]])
+    """Je Quelle die Meldung, die den Kern der Geschichte am besten trifft; wichtigste Quelle zuerst."""
+    center = sum((Counter(i["_v"]) for i in c), Counter())
+    best = {}
+    for i in sorted(c, key=lambda i: -cos(i["_v"], center)):
+        best.setdefault(i["source"], i)
+    return sorted(best.values(), key=lambda i: RANK[i["source"]])
 
 
 def render(items, failed, now):
-    cols = {(r, s): [] for r in REGIONS for s in SECTIONS}
+    cols = {(r, s): "" for r in REGIONS for s in SECTIONS}
     for region in REGIONS:
         pool = [i for i in items if i["region"] == region]
         weigh(pool)
@@ -489,46 +519,47 @@ def render(items, failed, now):
         context = relate(top, side)
         shown = {id(c) for c in top}
         rest = [c for c in clusters if id(c) not in shown and any(i["topics"] for i in c)]
-        cols[region, "news"] = ([entry(by_source(c), now, "top", ctx) for c, ctx in zip(top, context)]
-                                + [entry(by_source(c), now, "extra") for c in rest])
+        cols[region, "news"] = ("".join(story(by_source(c), now, n, ctx) for n, (c, ctx) in enumerate(zip(top, context), 1))
+                                + "".join(story(by_source(c), now) for c in rest))
         for s in ("meinung", "analyse", "podcast"):
             # Je Feed die besten Beiträge: erst was zu einer Top-Meldung gehört, dann was eines der Themen trifft,
             # dann das Neueste. Bei Podcasts zählt nach der Top-Meldung nur die Aktualität.
             for url in dict.fromkeys(f[3] for f in FEEDS if f[:2] == (region, s)):
                 mine = sorted((i for i in side if i["feed"] == url),
-                              key=lambda i: ("_story" not in i, s != "podcast" and not i["topics"]))
-                cols[region, s] += [entry([i], now) for i in mine[:SECTIONS[s][2]]]
+                              key=lambda i: ("_story" not in i, s != "podcast" and not i["topics"]))[:SECTIONS[s][2]]
+                if mine:
+                    cols[region, s] += f'<div class="group"><h4>{e(mine[0]["source"])}</h4>{"".join(row(i, now) for i in mine)}</div>'
 
     local = now.astimezone(TZ)
     dateline = f"{DAYS[local.weekday()]}, {local.day}. {MONTHS[local.month - 1]} {local.year}"
-    radio = lambda name, key, label, on, lang="": (
-        f'<input type="radio" name="{name}" id="{name}-{key}"{" checked" if on else ""}>'
-        f'<label for="{name}-{key}"{lang}>{e(label)}</label>')
+    radio = lambda name, key, label, on=False, lang="": (
+        f'<label{lang}><input type="radio" name="{name}" id="{name}-{key}"{" checked" if on else ""}>{e(label)}</label>')
     regions = "".join(radio("r", r, sw, r == "de", f' lang="{r}"') for r, (_, sw) in REGIONS.items())
-    topics = radio("t", "alle", "Alle", True) + "".join(radio("t", t, name, False) for t, (name, _) in TOPICS.items())
+    tabs = "".join(radio("s", s, title, s == "news") for s, (title, *_) in SECTIONS.items() if title)
+    topics = radio("t", "alle", "Alle", True) + "".join(radio("t", t, name) for t, (name, _) in TOPICS.items())
 
-    bands = ""
-    for s, (title, *_rest) in SECTIONS.items():
+    bands, css = "", STYLE
+    for s, (title, *_) in SECTIONS.items():
         if not title:
             continue
         inner = "".join(
             f'<div class="col" data-r="{r}" lang="{r}"><h3 lang="de">{e(REGIONS[r][0])}</h3>'
-            f'{"".join(cols[r, s]) or "<p class=none lang=de>Heute nichts Neues.</p>"}</div>' for r in REGIONS)
-        bands += f'<section class="band"><h2>{e(title)}</h2><div class="cols">{inner}</div></section>'
-
-    css = STYLE
+            f'{cols[r, s] or "<p class=none lang=de>Heute nichts Neues.</p>"}</div>' for r in REGIONS)
+        bands += f'<section class="band" data-s="{s}"><h2>{e(title)}</h2><div class="cols">{inner}</div></section>'
+        css += f':root:has(#s-{s}:checked) .band:not([data-s="{s}"]){{display:none}}\n'  # nur die gewählte Rubrik
     for r in REGIONS:  # Handy: nur der gewählte Sprachraum
         css += f'@media (max-width:59.99rem){{:root:has(#r-{r}:checked) .col:not([data-r="{r}"]){{display:none}}}}\n'
-    for t in TOPICS:   # Themenfilter ganz ohne JavaScript
-        css += (f':root:has(#t-{t}:checked) article:not([data-t~="{t}"]){{display:none}}\n'
-                f':root:has(#t-{t}:checked) article.extra[data-t~="{t}"]{{display:block}}\n'
+    for t in TOPICS:   # Themenfilter: läuft wie die Reiter ganz ohne JavaScript
+        css += (f':root:has(#t-{t}:checked) article:not([data-t~="{t}"]),'
+                f':root:has(#t-{t}:checked) .group:not(:has(article[data-t~="{t}"])){{display:none}}\n'
+                f':root:has(#t-{t}:checked) article.extra[data-t~="{t}"]{{display:grid}}\n'
                 f':root:has(#t-{t}:checked) .col:not(:has(article[data-t~="{t}"]))::after{{content:"Dazu heute nichts."}}\n')
 
     sources = "".join(
         f'<p><b>{e(REGIONS[r][0])}:</b> {e(", ".join(dict.fromkeys(f[2] for f in FEEDS if f[0] == r)))}</p>' for r in REGIONS)
     missing = f'<p>Heute nicht erreichbar: {e(", ".join(failed))}.</p>' if failed else ""
     return f"""<!doctype html>
-<html lang="de">
+<html lang="de" data-built="{now.isoformat()}">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
@@ -547,10 +578,15 @@ def render(items, failed, now):
 <div class="page">
 <header>
 <h1>Presseschau</h1>
-<p>{dateline} · Stand {local:%H:%M} Uhr · Politik aus drei Sprachräumen</p>
+<p>{dateline} · Stand {local:%H:%M} Uhr<span class="wide"> · Politik aus drei Sprachräumen</span></p>
+<p id="stale" hidden>Diese Ausgabe ist älter als 36 Stunden. Die automatische Aktualisierung hängt offenbar.</p>
 </header>
+<div class="bar">
 <fieldset class="switch regions"><legend>Sprachraum</legend>{regions}</fieldset>
+<fieldset class="switch tabs"><legend>Rubrik</legend>{tabs}</fieldset>
+</div>
 <fieldset class="switch topics"><legend>Thema</legend>{topics}</fieldset>
+<script>{SCRIPT}</script>
 <main>{bands}</main>
 <footer>
 <details><summary>Quellen dieser Ausgabe</summary>{sources}</details>
@@ -563,7 +599,23 @@ def render(items, failed, now):
 """
 
 
-STYLE = """/* Layout: drei Spalten = drei Sprachräume, Bänder = Rubriken. Am Handy ein Sprachraum zur Zeit, der Umschalter klebt oben. */
+# Die Seite funktioniert auch ohne dieses Skript. Es merkt sich nur den Sprachraum, springt beim Wechsel der Rubrik
+# nach oben und warnt, wenn die Ausgabe veraltet ist.
+SCRIPT = """(function () {
+  var saved = null;
+  try { saved = localStorage.getItem("presseschau-sprachraum"); } catch (err) {}
+  var choice = saved && document.getElementById(saved);
+  if (choice && choice.name === "r") choice.checked = true;
+  document.addEventListener("change", function (event) {
+    var input = event.target;
+    if (input.name === "r") { try { localStorage.setItem("presseschau-sprachraum", input.id); } catch (err) {} }
+    if (input.name === "s") window.scrollTo(0, 0);
+  });
+  var age = Date.now() - Date.parse(document.documentElement.getAttribute("data-built"));
+  if (age > 36 * 3600 * 1000) document.getElementById("stale").hidden = false;
+})();"""
+
+STYLE = """/* Layout: eine Rubrik zur Zeit (Reiter), darin drei Spalten = drei Sprachräume. Am Handy ein Sprachraum zur Zeit. */
 :root {
   --paper: #f2f5f7; --ink: #14202b; --muted: #54616e; --faint: #d9dfe5; --read: #7b8895;
   --marker: #ffe35a; --marker-ink: #2a2300;
@@ -579,66 +631,84 @@ STYLE = """/* Layout: drei Spalten = drei Sprachräume, Bänder = Rubriken. Am H
 * { box-sizing: border-box }
 body { margin: 0; background: var(--paper); color: var(--ink); font: 1rem/1.5 var(--sans); -webkit-text-size-adjust: 100% }
 body::before { content: ""; position: fixed; inset: 0 0 auto; height: env(safe-area-inset-top, 0px); z-index: 10; background: var(--paper) }
-.page { max-width: 88rem; margin-inline: auto; padding-block: 1.75rem 3rem; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)) }
+.page { max-width: 88rem; margin-inline: auto; padding-block: 1.5rem 3rem; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)) }
 a:focus-visible, summary:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px }
-header h1 { margin: 0; font: 700 2.1rem/1.1 var(--serif); letter-spacing: -.01em }
-header p { margin: .35rem 0 0; color: var(--muted); font-size: .9rem; font-variant-numeric: tabular-nums }
+header h1 { margin: 0; font: 700 2rem/1.1 var(--serif); letter-spacing: -.01em }
+header p { margin: .3rem 0 0; color: var(--muted); font-size: .88rem; font-variant-numeric: tabular-nums }
+#stale { padding: .4rem .6rem; background: var(--marker); color: var(--marker-ink); font-weight: 600 }
 
-/* Umschalter: echte Radio-Buttons, als Marken gestaltet */
-.switch { border: 0; margin: 1.1rem 0 0; padding: 0; min-width: 0; display: flex; flex-wrap: wrap; align-items: center; gap: .4rem }
-.switch legend { float: left; padding: 0; margin-right: .35rem; font-size: .72rem; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; color: var(--muted) }
-.switch input { position: absolute; width: 1px; height: 1px; margin: 0; opacity: 0; pointer-events: none }
-.switch label { cursor: pointer; padding: .28rem .8rem; border: 1px solid var(--faint); border-radius: 999px; font-size: .88rem; line-height: 1.4; user-select: none; -webkit-user-select: none }
-.switch label:hover { border-color: var(--muted) }
-.switch input:checked + label { background: var(--marker); border-color: var(--marker); color: var(--marker-ink); font-weight: 600 }
-.switch input:focus-visible + label { outline: 2px solid var(--ink); outline-offset: 2px }
-.regions { display: none }
+/* Umschalter: echte Radio-Buttons, unsichtbar über ihrer Beschriftung */
+.switch { border: 0; margin: 0; padding: 0; min-width: 0; display: flex; align-items: center; gap: .4rem }
+.switch legend { float: left; padding: 0; margin-right: .5rem; font-size: .72rem; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; color: var(--muted) }
+.switch label { position: relative; flex: none; cursor: pointer; line-height: 1.4; user-select: none; -webkit-user-select: none }
+.switch input { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; opacity: 0; cursor: pointer }
+.switch label:has(:focus-visible) { outline: 2px solid var(--ink); outline-offset: 2px }
+.regions legend, .tabs legend, .band > h2 { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap }
+.regions label, .topics label { padding: .28rem .8rem; border: 1px solid var(--faint); border-radius: 999px; font-size: .88rem }
+.regions label:hover, .topics label:hover { border-color: var(--muted) }
+.regions label:has(:checked), .topics label:has(:checked) { background: var(--marker); border-color: var(--marker); color: var(--marker-ink); font-weight: 600 }
+.bar { position: sticky; top: env(safe-area-inset-top, 0px); z-index: 5; margin-top: .9rem; display: grid; gap: .45rem; background: var(--paper); border-bottom: 1px solid var(--faint) }
+.regions { display: none; padding-top: .45rem }
+.tabs { gap: 1.6rem }
+.tabs label { padding: .55rem 0 .4rem; border-bottom: 3px solid transparent; color: var(--muted); font-weight: 600 }
+.tabs label:hover { color: var(--ink) }
+.tabs label:has(:checked) { border-color: var(--ink); color: var(--ink) }
+.topics { margin-top: .9rem; flex-wrap: wrap }
 
-.band { margin-top: 2.75rem }
-.band > h2 { margin: 0 0 1.1rem; padding-top: .8rem; border-top: 3px solid var(--ink); font: 700 .8rem/1.2 var(--sans); letter-spacing: .12em; text-transform: uppercase }
+main { margin-top: 1.5rem }
 .cols { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 2rem 2.75rem; align-items: start }
-.col { min-width: 0; display: flex; flex-direction: column; gap: 1.15rem }
-.col > h3 { margin: 0; font: 600 .8rem/1.2 var(--sans); color: var(--muted) }
+.col { min-width: 0; display: flex; flex-direction: column; gap: 1.25rem }
+.col > h3 { margin: 0; padding-bottom: .5rem; border-bottom: 3px solid var(--ink); font: 700 .8rem/1.2 var(--sans); letter-spacing: .1em; text-transform: uppercase }
 .col::after, .none { margin: 0; color: var(--muted); font-size: .9rem }
 
 article { min-width: 0 }
-article h4 { margin: 0; font: 600 1.06rem/1.3 var(--serif); text-wrap: balance; overflow-wrap: anywhere }
-article.top h4 { font-size: 1.22rem; line-height: 1.25 }
-article h4 a { color: inherit; text-decoration: none }
-article h4 a:hover { text-decoration: underline; text-underline-offset: .16em }
-article h4 a:visited { color: var(--read) }
-.teaser { margin: .3rem 0 0; font-size: .9rem; color: var(--muted); overflow-wrap: anywhere }
-.meta { margin: .35rem 0 0; display: flex; flex-wrap: wrap; align-items: center; gap: .2rem .55rem; font-size: .78rem; color: var(--muted); font-variant-numeric: tabular-nums }
-.src { font-weight: 600; color: var(--ink) }
-.tag { padding: 0 .4rem; border-radius: 2px; background: var(--marker); color: var(--marker-ink); font-weight: 600 }
-.also { margin-top: .4rem; font-size: .84rem }
-.also summary { cursor: pointer; color: var(--muted); width: fit-content }
-.also ul { margin: .4rem 0 0; padding: 0 0 0 .9rem; list-style: none; display: grid; gap: .35rem; border-left: 2px solid var(--faint) }
-.also a { color: inherit; text-underline-offset: .16em }
-.also a:visited { color: var(--read) }
+article a { color: inherit; text-decoration: none; overflow-wrap: anywhere }
+article a:hover { text-decoration: underline; text-underline-offset: .16em }
+article a:visited { color: var(--read) }
+.top, .extra { display: grid; grid-template-columns: 1.7rem minmax(0, 1fr) }
+.top > div, .extra > div { grid-column: 2; min-width: 0 }
 .extra { display: none }
-.context { margin-top: .6rem; padding-left: .9rem; border-left: 2px solid var(--marker) }
-.context h5 { margin: 0 0 .35rem; font: 700 .68rem/1.2 var(--sans); letter-spacing: .1em; text-transform: uppercase; color: var(--muted) }
-.context ul { margin: 0; padding: 0; list-style: none; display: grid; gap: .45rem; font-size: .9rem; line-height: 1.35 }
-.context a { color: inherit; font-family: var(--serif); font-weight: 600; text-decoration: none; overflow-wrap: anywhere }
-.context a:hover { text-decoration: underline; text-underline-offset: .16em }
-.context a:visited { color: var(--read) }
-.kind { margin-right: .2rem; font-size: .68rem; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: var(--muted) }
+.rank { font: 700 1.05rem/1.45 var(--sans); color: var(--muted); font-variant-numeric: tabular-nums }
+article h4 { margin: 0; font: 600 1.12rem/1.28 var(--serif); text-wrap: balance }
+.extra h4 { font-size: 1rem }
+.teaser { margin: .25rem 0 0; font-size: .9rem; color: var(--muted); display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden }
+.meta { margin-top: .3rem; display: flex; flex-wrap: wrap; align-items: center; gap: .15rem .6rem; font-size: .78rem; color: var(--muted); font-variant-numeric: tabular-nums }
+.src { font-weight: 600; color: var(--ink) }
+.tag { padding: 0 .4rem; border-radius: 2px; background: var(--marker); color: var(--marker-ink); font-size: .74rem; font-weight: 600; white-space: nowrap }
+.also summary { cursor: pointer; list-style: none; text-decoration: underline dotted; text-underline-offset: .2em }
+.also summary::-webkit-details-marker { display: none }
+.also[open] { flex-basis: 100% }
+.also ul { margin: .4rem 0 .2rem; padding: 0 0 0 .8rem; list-style: none; display: grid; gap: .3rem; border-left: 2px solid var(--faint); font-size: .84rem }
+.also b { font-weight: 600; color: var(--ink) }
+.context { margin: .5rem 0 0; padding: 0 0 0 .8rem; list-style: none; display: grid; gap: .35rem; border-left: 2px solid var(--marker); font-size: .9rem; line-height: 1.35 }
+.context a { font-family: var(--serif); font-weight: 600 }
+.kind { margin-right: .25rem; font-size: .68rem; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: var(--muted) }
 .by { color: var(--muted); font-size: .78rem }
+
+/* Meinung, Analyse, Podcasts: je Quelle eine kleine Gruppe mit knappen Zeilen */
+.group { display: grid; gap: .45rem }
+.group h4 { margin: 0; font: 700 .72rem/1.3 var(--sans); letter-spacing: .08em; text-transform: uppercase; color: var(--muted) }
+.group article { line-height: 1.3 }
+.group article a { font: 600 1.02rem/1.3 var(--serif) }
+.when { margin-left: .4rem; font-size: .78rem; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap }
+.when > * + * { margin-left: .4rem }
 
 footer { margin-top: 3rem; padding-top: 1rem; border-top: 1px solid var(--faint); color: var(--muted); font-size: .82rem; max-width: 65ch }
 footer p { margin: .5rem 0 0 }
 footer summary { cursor: pointer; width: fit-content }
 
 @media (max-width: 59.99rem) {
-  .regions { display: flex; flex-wrap: nowrap; position: sticky; top: env(safe-area-inset-top, 0px); z-index: 5; margin-top: .9rem; padding-block: .55rem; background: var(--paper); border-bottom: 1px solid var(--faint) }
-  .regions legend { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%) }
+  .regions { display: flex }
   .regions label { flex: 1; text-align: center }
-  .topics { margin-top: .8rem }
+  .tabs { justify-content: space-between; gap: .5rem }
+  .tabs label { font-size: .95rem }
+  .topics { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; margin-top: .7rem; padding-block: .1rem }
+  .topics::-webkit-scrollbar { display: none }
+  .topics legend, .col > h3 { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap }
   .cols { grid-template-columns: minmax(0, 1fr) }
-  .col > h3 { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%) }
-  .band { margin-top: 2.25rem }
-  header h1 { font-size: 1.8rem }
+  .wide { display: none }
+  main { margin-top: 1.1rem }
+  header h1 { font-size: 1.7rem }
 }
 """
 
@@ -686,6 +756,7 @@ def selftest():
     assert a[0]["title"] == "Bundestag & Klimaschutzgesetz" and a[0]["text"] == "Die Novelle kommt. x"
     assert a[0]["topics"] == {"klima", "recht"}, a[0]["topics"]
     assert b[0]["link"] == "https://x.test/b" and b[0]["topics"] == {"todesstrafe", "ki"}, b
+    assert [minutes(x) for x in ("2543", "42:23", "1:02:30", "", "live")] == [42, 42, 62, 0, 0]
     tag = lambda t: {k for k, (_, rx) in TOPICS.items() if rx.search(t)}
     assert tag("Das politische Betriebsklima und die gesetzliche Rente") == set()
     assert tag("J'ai lu que la motion de censure échoue") == set()
