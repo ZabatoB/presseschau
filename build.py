@@ -3,6 +3,7 @@
 
     python3 build.py          holt alle Feeds und schreibt docs/index.html
     python3 build.py --test   Selbsttest ohne Netz
+    python3 build.py --ersatz baut nur, wenn die vorhandene Ausgabe älter als drei Stunden ist
 
 Quellen pflegen: Liste FEEDS. Themen pflegen: TOPICS. Mehr Stellschrauben gibt es nicht.
 Nur Standardbibliothek, keine Abhängigkeiten.
@@ -714,6 +715,15 @@ footer summary { cursor: pointer; width: fit-content }
 """
 
 
+def fresh(hours, page=OUT):
+    """True, wenn die vorhandene Ausgabe jünger als `hours` Stunden ist. Im Zweifel False, dann wird gebaut."""
+    try:
+        built = re.search(r'data-built="([^"]+)"', page.read_text(encoding="utf-8")).group(1)
+        return datetime.now(timezone.utc) - datetime.fromisoformat(built) < timedelta(hours=hours)
+    except (OSError, AttributeError, ValueError, TypeError):
+        return False
+
+
 def build():
     now = datetime.now(timezone.utc)
     with ThreadPoolExecutor(16) as pool:
@@ -777,8 +787,20 @@ def selftest():
     assert select(("de", "meinung", "NZZ: Meinung", ""), raw, now)[0]["title"] == "Mutlos"
     page = render([{**a[0], "title": "<script>alert(1)</script>"}], ["Kaputt <b>"], now)
     assert "<script>alert" not in page and "&lt;script&gt;alert(1)" in page and "Kaputt &lt;b&gt;" in page
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        old = Path(tmp) / "index.html"
+        old.write_text(f'<html data-built="{(datetime.now(timezone.utc) - timedelta(hours=2)).isoformat(timespec="seconds")}">', encoding="utf-8")
+        assert fresh(3, old) and not fresh(1, old) and not fresh(3, Path(tmp) / "fehlt.html")
+        old.write_text("<html>", encoding="utf-8")
+        assert not fresh(3, old)   # ohne Zeitstempel wird gebaut
     print("Selbsttest ok")
 
 
 if __name__ == "__main__":
-    selftest() if "--test" in sys.argv else build()
+    if "--test" in sys.argv:
+        selftest()
+    elif "--ersatz" in sys.argv and fresh(3):
+        print("Die vorhandene Ausgabe ist jünger als drei Stunden, kein neuer Bau.")
+    else:
+        build()

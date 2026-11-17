@@ -20,16 +20,8 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - run: python3 -I build.py --test
-      - name: Ausgabe bauen
-        run: |
-          # Ein Ersatz-Lauf baut nur, wenn die letzte Ausgabe älter als drei Stunden ist.
-          gebaut=$(grep -o 'data-built="[^"]*' docs/index.html | cut -d'"' -f2)
-          if [ "$GITHUB_EVENT_NAME" = "schedule" ] && [ -n "$gebaut" ] \
-             && [ $(( $(date +%s) - $(date -d "$gebaut" +%s) )) -lt 10800 ]; then
-            echo "Die Ausgabe von $gebaut ist frisch genug, kein neuer Bau."
-            exit 0
-          fi
-          python3 -I build.py
+      # Geplante Läufe sind zum Teil Ersatz-Läufe: Sie bauen nur, wenn die letzte Ausgabe älter als drei Stunden ist.
+      - run: python3 -I build.py ${{ github.event_name == 'schedule' && '--ersatz' || '' }}
       # ponytail: Die fertige Seite wird ins Repo committet. Das hält den Zeitplan am Leben
       # (GitHub schaltet geplante Workflows nach 60 Tagen ohne Aktivität ab) und spart ein eigenes
       # Pages-Deployment. Wird die Historie zu groß: auf actions/deploy-pages umstellen.
